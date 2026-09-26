@@ -112,30 +112,38 @@ def run_pipeline(
         print("\n--> [Phase 3] Extracting 36 Deep Interaction Features (Stage 3)...")
         t0 = time.time()
         df_train_cand_all = pd.concat([df_train_s2, df_train_s3], ignore_index=True)
-        s1_lookup = df_train_s1.set_index("entity_id")
-        cand_lookup = df_train_cand_all.set_index("entity_id")
+        s1_dict = df_train_s1.set_index("entity_id").to_dict("index")
+        cand_dict = df_train_cand_all.set_index("entity_id").to_dict("index")
+        del df_train_cand_all
+        import gc
+        gc.collect()
 
         X_rows = []
         y_labels = []
 
         for s1_id, c_list in tqdm(train_candidates.items(), desc="Extracting Train Features"):
-            if s1_id not in s1_lookup.index:
+            s1_row = s1_dict.get(s1_id)
+            if s1_row is None:
                 continue
-            s1_row = s1_lookup.loc[s1_id]
             true_matches = gt_train.get(s1_id, set())
 
             for rank, cid in enumerate(c_list, start=1):
-                if cid not in cand_lookup.index:
+                cand_row = cand_dict.get(cid)
+                if cand_row is None:
                     continue
-                cand_row = cand_lookup.loc[cid]
                 feat = extract_pair_features(s1_row, cand_row, blocking_rank=rank)
                 label = 1 if cid in true_matches else 0
 
                 X_rows.append(feat)
                 y_labels.append(label)
 
+        del s1_dict, cand_dict
+        gc.collect()
+
         X_train = np.array(X_rows, dtype=np.float32)
         y_train = np.array(y_labels, dtype=np.int32)
+        del X_rows, y_labels
+        gc.collect()
         print(f"Constructed feature matrix: {X_train.shape} with {y_train.sum():,} positive pairs in {time.time()-t0:.2f}s")
 
         print("\n--> [Phase 4] Training & Calibrating LightGBM Re-Ranker (Stage 4)...")
@@ -171,6 +179,10 @@ def run_pipeline(
         print(f"  - Singleton Cutoff (tau_singleton):   {best_singleton_thresh:.4f}")
         print(f"  - Achieved Macro F_0.5 Score:         {best_f05:.4f}")
 
+        # Free all training memory before test phase
+        del df_train_s1, df_train_s2, df_train_s3, gt_train, train_candidates, train_scores_per_s1, X_train, y_train, train_probs
+        gc.collect()
+
     # -------------------------------------------------------------------------
     # Test Inference Stage
     # -------------------------------------------------------------------------
@@ -184,6 +196,8 @@ def run_pipeline(
         df_test_s1 = preprocess_dataframe(df_test_s1_raw)
         df_test_s2 = preprocess_dataframe(df_test_s2_raw)
         df_test_s3 = preprocess_dataframe(df_test_s3_raw)
+        del df_test_s1_raw, df_test_s2_raw, df_test_s3_raw
+        gc.collect()
         print(f"Loaded & normalized test records: S1 ({len(df_test_s1):,}), S2 ({len(df_test_s2):,}), S3 ({len(df_test_s3):,})")
 
         print("--> Generating Test Candidate Pairs...")
@@ -195,8 +209,13 @@ def run_pipeline(
 
         print("--> Extracting Features & Scoring Test Pairs in Memory-Safe Batches...")
         df_test_cand_all = pd.concat([df_test_s2, df_test_s3], ignore_index=True)
-        s1_test_lookup = df_test_s1.set_index("entity_id")
-        cand_test_lookup = df_test_cand_all.set_index("entity_id")
+        del df_test_s2, df_test_s3
+        gc.collect()
+
+        s1_test_dict = df_test_s1.set_index("entity_id").to_dict("index")
+        cand_test_dict = df_test_cand_all.set_index("entity_id").to_dict("index")
+        del df_test_cand_all
+        gc.collect()
 
         matching_output_path = os.path.join(output_dir, "matching_results.tsv")
         all_test_s1_ids = list(test_candidates.keys())
@@ -211,15 +230,15 @@ def run_pipeline(
                 batch_pairs = []
 
                 for s1_id in batch_s1_ids:
-                    if s1_id not in s1_test_lookup.index:
+                    s1_row = s1_test_dict.get(s1_id)
+                    if s1_row is None:
                         continue
-                    s1_row = s1_test_lookup.loc[s1_id]
                     c_list = test_candidates.get(s1_id, [])
 
                     for rank, cid in enumerate(c_list, start=1):
-                        if cid not in cand_test_lookup.index:
+                        cand_row = cand_test_dict.get(cid)
+                        if cand_row is None:
                             continue
-                        cand_row = cand_test_lookup.loc[cid]
                         feat = extract_pair_features(s1_row, cand_row, blocking_rank=rank)
                         batch_rows.append(feat)
                         batch_pairs.append((s1_id, cid))
@@ -254,8 +273,8 @@ if __name__ == "__main__":
     parser.add_argument("--train-dir", default="data/train", help="Directory with train source and ground truth files")
     parser.add_argument("--test-dir", default="data/test", help="Directory with test source files")
     parser.add_argument("--output-dir", default="output", help="Directory to save submission files")
-    parser.add_argument("--top-k", type=int, default=20, help="Number of candidates to generate per source")
-    parser.add_argument("--max-train-samples", type=int, default=80000, help="Maximum S1 training samples")
+    parser.add_argument("--top-k", type=int, default=15, help="Number of candidates to generate per source")
+    parser.add_argument("--max-train-samples", type=int, default=40000, help="Maximum S1 training samples")
     args = parser.parse_args()
 
     run_pipeline(
@@ -265,4 +284,5 @@ if __name__ == "__main__":
         top_k=args.top_k,
         max_train_samples=args.max_train_samples,
     )
+
 

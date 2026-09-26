@@ -35,7 +35,8 @@ python -m code.business_entity_resolution.src.pipeline \
     --train-dir data/train \
     --test-dir data/test \
     --output-dir output \
-    --top-k 25
+    --top-k 15 \
+    --max-train-samples 40000
 
 # 5. Validate outputs against official competition rules
 echo "--> Validating Submission Files..."
