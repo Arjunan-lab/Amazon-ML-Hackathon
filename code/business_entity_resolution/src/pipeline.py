@@ -97,6 +97,20 @@ def run_pipeline(
     best_singleton_thresh = 0.90
     model = None
 
+    model_save_path = os.path.join(output_dir, "ranker_model.joblib")
+    thresh_save_path = os.path.join(output_dir, "thresholds.json")
+
+    if os.path.exists(model_save_path) and os.path.exists(thresh_save_path):
+        import joblib, json
+        print(f"\n--> Found cached trained model at {model_save_path}. Loading...")
+        model = joblib.load(model_save_path)
+        with open(thresh_save_path, "r") as f_th:
+            th_data = json.load(f_th)
+            best_match_thresh = th_data["match_thresh"]
+            best_singleton_thresh = th_data["singleton_thresh"]
+        print(f"Loaded trained model! Thresholds: match={best_match_thresh:.4f}, singleton={best_singleton_thresh:.4f}")
+        has_train = False
+
     # -------------------------------------------------------------------------
     # Training Stage
     # -------------------------------------------------------------------------
@@ -193,6 +207,16 @@ def run_pipeline(
         print(f"  - Match Threshold (tau_match):       {best_match_thresh:.4f}")
         print(f"  - Singleton Cutoff (tau_singleton):   {best_singleton_thresh:.4f}")
         print(f"  - Achieved Macro F_0.5 Score:         {best_f05:.4f}")
+
+        # Save model and thresholds for fast reuse
+        try:
+            import joblib, json
+            joblib.dump(model, model_save_path)
+            with open(thresh_save_path, "w") as f_th:
+                json.dump({"match_thresh": float(best_match_thresh), "singleton_thresh": float(best_singleton_thresh)}, f_th)
+            print(f"Saved trained model and thresholds to {output_dir}/")
+        except Exception as e:
+            print(f"Warning: Failed to save model: {e}")
 
         # Free all training memory before test phase
         del df_train_s1, df_train_s2, df_train_s3, gt_train, train_candidates, train_scores_per_s1, X_train, y_train, train_probs

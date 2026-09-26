@@ -64,7 +64,7 @@ def generate_candidate_pairs(
     df_s2: pd.DataFrame,
     df_s3: pd.DataFrame,
     top_k_per_source: int = 20,
-    chunk_size: int = 2500,
+    chunk_size: int = 200,
     max_features: int = 200000,
 ) -> Dict[str, List[str]]:
     """Generates candidate matches from S2 and S3 for every entity in S1.
@@ -74,7 +74,7 @@ def generate_candidate_pairs(
         df_s2: Source 2 DataFrame with same schema
         df_s3: Source 3 DataFrame with same schema
         top_k_per_source: Number of top candidates to retrieve per secondary source (default 20)
-        chunk_size: Batch size for S1 queries to bound RAM utilization
+        chunk_size: Batch size for S1 queries to bound RAM utilization (default 200 for sub-100MB sparse buffers)
         max_features: Maximum vocabulary size for character n-gram indexing
 
     Returns:
@@ -131,8 +131,12 @@ def generate_candidate_pairs(
 
         try:
             cand_matrix = vectorizer.fit_transform(cand_texts)
+            del cand_texts
+            gc.collect()
             # cand_matrix is N x V. Transpose for dot product: V x N
             cand_matrix_t = cand_matrix.T.tocsr()
+            del cand_matrix
+            gc.collect()
         except ValueError:
             # Fallback if partition text is empty
             continue
@@ -140,8 +144,7 @@ def generate_candidate_pairs(
         # Pass B: Number Anchor Inverted Index
         num_anchor_index = build_number_anchor_index(cand_country)
 
-
-        # Query in chunks to strictly control RAM
+        # Query in chunks of 200 to strictly bound RAM and prevent swap thrashing
         n_queries = len(s1_ids)
         total_target_k = top_k_per_source * 2
         s1_country_num_tokens = s1_country["num_tokens"].tolist()
@@ -151,8 +154,7 @@ def generate_candidate_pairs(
             s1_chunk_texts = s1_texts[start_idx:end_idx]
             s1_chunk_matrix = vectorizer.transform(s1_chunk_texts)
 
-            # Sparse dot product: (chunk_size x V) * (V x N_cands) -> CSR sparse matrix
-            # NEVER call .toarray() here: on 10 million test candidates, .toarray() creates a 100 GB dense matrix!
+            # Sparse dot product with bounded chunk size: (200 x V) * (V x N_cands)
             similarity_sparse = s1_chunk_matrix.dot(cand_matrix_t)
 
             for local_i in range(len(s1_chunk_texts)):
@@ -230,7 +232,7 @@ def generate_candidate_pairs(
 
 
         # Free memory after each country partition
-        del cand_matrix, cand_matrix_t, vectorizer, num_anchor_index
+        del cand_matrix_t, vectorizer, num_anchor_index
         gc.collect()
 
     # Final Deduplication & Sanity Assertion (ensures no duplicate IDs per list)
