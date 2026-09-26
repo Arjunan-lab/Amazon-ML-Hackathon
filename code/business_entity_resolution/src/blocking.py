@@ -147,33 +147,54 @@ def generate_candidate_pairs(
         # Query in chunks to strictly control RAM
         n_queries = len(s1_ids)
         total_target_k = top_k_per_source * 2
+        s1_country_num_tokens = s1_country["num_tokens"].tolist()
 
         for start_idx in range(0, n_queries, chunk_size):
             end_idx = min(start_idx + chunk_size, n_queries)
             s1_chunk_texts = s1_texts[start_idx:end_idx]
             s1_chunk_matrix = vectorizer.transform(s1_chunk_texts)
 
-            # Sparse dot product: (chunk_size x V) * (V x N_cands) -> (chunk_size x N_cands)
-            similarity_chunk = s1_chunk_matrix.dot(cand_matrix_t).toarray()
+            # Sparse dot product: (chunk_size x V) * (V x N_cands) -> CSR sparse matrix
+            # NEVER call .toarray() here: on 10 million test candidates, .toarray() creates a 100 GB dense matrix!
+            similarity_sparse = s1_chunk_matrix.dot(cand_matrix_t)
 
             for local_i in range(len(s1_chunk_texts)):
                 global_s1_idx = start_idx + local_i
                 s1_id = s1_ids[global_s1_idx]
-                sim_row = similarity_chunk[local_i]
 
-                # 1. Retrieve top lexical candidates
-                top_cand_indices = _extract_top_k_indices(sim_row, k=total_target_k, min_score=0.08)
+                # Extract sparse row indices and values directly
+                r_start = similarity_sparse.indptr[local_i]
+                r_end = similarity_sparse.indptr[local_i + 1]
+                row_cols = similarity_sparse.indices[r_start:r_end]
+                row_vals = similarity_sparse.data[r_start:r_end]
+
+                sim_map = {}
+                for c_col, c_val in zip(row_cols, row_vals):
+                    sim_map[int(c_col)] = float(c_val)
+
+                # 1. Retrieve top lexical candidates from sparse non-zeros
+                if len(row_vals) > 0:
+                    valid_mask = row_vals >= 0.08
+                    v_cols = row_cols[valid_mask]
+                    v_vals = row_vals[valid_mask]
+                    if len(v_vals) > total_target_k:
+                        top_p = np.argpartition(-v_vals, total_target_k)[:total_target_k]
+                        top_p = top_p[np.argsort(-v_vals[top_p])]
+                        top_cand_indices = [int(v_cols[p]) for p in top_p]
+                    else:
+                        top_p = np.argsort(-v_vals)
+                        top_cand_indices = [int(v_cols[p]) for p in top_p]
+                else:
+                    top_cand_indices = []
 
                 # 2. Add Number Anchor candidates (Pass B)
-                s1_row_data = s1_country.iloc[global_s1_idx]
-                s1_nums = s1_row_data.get("num_tokens", set())
+                s1_nums = s1_country_num_tokens[global_s1_idx]
                 anchor_indices = set()
                 if isinstance(s1_nums, (set, list)):
                     for num in s1_nums:
                         if len(num) >= 3 and num in num_anchor_index:
-                            # Add matches that share non-trivial lexical similarity (> 0.03)
                             for c_idx in num_anchor_index[num][:10]:
-                                if sim_row[c_idx] > 0.03:
+                                if sim_map.get(c_idx, 0.0) > 0.03:
                                     anchor_indices.add(c_idx)
 
                 # 3. Merge and balance between S2 and S3
@@ -183,7 +204,7 @@ def generate_candidate_pairs(
                 # Combine indices, prioritizing lexical similarity score
                 combined_indices = sorted(
                     list(set(top_cand_indices).union(anchor_indices)),
-                    key=lambda idx: sim_row[idx],
+                    key=lambda idx: sim_map.get(idx, 0.0),
                     reverse=True
                 )
 
@@ -210,8 +231,9 @@ def generate_candidate_pairs(
 
                 candidate_results[s1_id] = merged_candidates
 
+
         # Free memory after each country partition
-        del cand_matrix, cand_matrix_t, similarity_chunk, vectorizer, num_anchor_index
+        del cand_matrix, cand_matrix_t, vectorizer, num_anchor_index
         gc.collect()
 
     # Final Deduplication & Sanity Assertion (ensures no duplicate IDs per list)
