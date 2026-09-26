@@ -84,27 +84,23 @@ def generate_candidate_pairs(
     s1_all_ids: List[str] = df_s1["entity_id"].astype(str).tolist()
     candidate_results: Dict[str, List[str]] = {s1_id: [] for s1_id in s1_all_ids}
 
-    # 2. Combine secondary candidates and tag their source
-    df_s2 = df_s2.copy()
-    df_s3 = df_s3.copy()
-    df_s2["_source"] = "S2"
-    df_s3["_source"] = "S3"
-    df_candidates_all = pd.concat([df_s2, df_s3], ignore_index=True)
-
-    # 3. Dynamic Country Partitioning (open-set: US, India, France, etc.)
+    # 2. Dynamic Country Partitioning (processes one country at a time without 10M row copies)
     countries_s1 = set(df_s1["country"].fillna("").unique())
-    countries_cand = set(df_candidates_all["country"].fillna("").unique())
-    all_countries = sorted(list(countries_s1.union(countries_cand)))
+    all_countries = sorted([c for c in countries_s1 if c])
 
     for country in all_countries:
-        if not country:
-            continue
-
         s1_country = df_s1[df_s1["country"] == country]
-        cand_country = df_candidates_all[df_candidates_all["country"] == country].reset_index(drop=True)
+        s2_country = df_s2[df_s2["country"] == country].copy()
+        s3_country = df_s3[df_s3["country"] == country].copy()
 
-        if s1_country.empty or cand_country.empty:
+        if s1_country.empty or (s2_country.empty and s3_country.empty):
             continue
+
+        s2_country["_source"] = "S2"
+        s3_country["_source"] = "S3"
+        cand_country = pd.concat([s2_country, s3_country], ignore_index=True)
+        del s2_country, s3_country
+        gc.collect()
 
         s1_ids = s1_country["entity_id"].astype(str).tolist()
         cand_ids = cand_country["entity_id"].astype(str).tolist()
@@ -123,12 +119,12 @@ def generate_candidate_pairs(
             s1_country["clean_addr"].fillna("")
         ).tolist()
 
-        # Pass A: Sparse Character n-gram TF-IDF Index
+        # Pass A: Sparse Character Trigram TF-IDF Index (bounded vocabulary)
         vectorizer = TfidfVectorizer(
             analyzer="char_wb",
-            ngram_range=(3, 4),
+            ngram_range=(3, 3),
             min_df=2,
-            max_features=max_features,
+            max_features=40000,
             sublinear_tf=True,
             dtype=np.float32,
         )
@@ -143,6 +139,7 @@ def generate_candidate_pairs(
 
         # Pass B: Number Anchor Inverted Index
         num_anchor_index = build_number_anchor_index(cand_country)
+
 
         # Query in chunks to strictly control RAM
         n_queries = len(s1_ids)

@@ -189,14 +189,10 @@ def run_pipeline(
     if has_test:
         print("\n--> [Phase 6] Running Inference on Test Dataset (Stage 6)...")
         t0 = time.time()
-        df_test_s1_raw = pd.read_csv(test_s1_path, sep="\t")
-        df_test_s2_raw = pd.read_csv(os.path.join(test_dir, "test_source2.tsv"), sep="\t")
-        df_test_s3_raw = pd.read_csv(os.path.join(test_dir, "test_source3.tsv"), sep="\t")
-
-        df_test_s1 = preprocess_dataframe(df_test_s1_raw)
-        df_test_s2 = preprocess_dataframe(df_test_s2_raw)
-        df_test_s3 = preprocess_dataframe(df_test_s3_raw)
-        del df_test_s1_raw, df_test_s2_raw, df_test_s3_raw
+        df_test_s1 = preprocess_dataframe(pd.read_csv(test_s1_path, sep="\t"))
+        df_test_s2 = preprocess_dataframe(pd.read_csv(os.path.join(test_dir, "test_source2.tsv"), sep="\t"))
+        df_test_s3 = preprocess_dataframe(pd.read_csv(os.path.join(test_dir, "test_source3.tsv"), sep="\t"))
+        import gc
         gc.collect()
         print(f"Loaded & normalized test records: S1 ({len(df_test_s1):,}), S2 ({len(df_test_s2):,}), S3 ({len(df_test_s3):,})")
 
@@ -208,14 +204,18 @@ def run_pipeline(
         print(f"Saved: {cand_output_path}")
 
         print("--> Extracting Features & Scoring Test Pairs in Memory-Safe Batches...")
-        df_test_cand_all = pd.concat([df_test_s2, df_test_s3], ignore_index=True)
-        del df_test_s2, df_test_s3
+        s1_test_dict = df_test_s1.set_index("entity_id").to_dict("index")
+        del df_test_s1
         gc.collect()
 
-        s1_test_dict = df_test_s1.set_index("entity_id").to_dict("index")
-        cand_test_dict = df_test_cand_all.set_index("entity_id").to_dict("index")
-        del df_test_cand_all
+        cand_test_dict = df_test_s2.set_index("entity_id").to_dict("index")
+        del df_test_s2
         gc.collect()
+
+        cand_test_dict.update(df_test_s3.set_index("entity_id").to_dict("index"))
+        del df_test_s3
+        gc.collect()
+
 
         matching_output_path = os.path.join(output_dir, "matching_results.tsv")
         all_test_s1_ids = list(test_candidates.keys())
