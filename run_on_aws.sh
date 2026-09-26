@@ -15,13 +15,14 @@ if [ -d "venv" ]; then
     source venv/bin/activate
 fi
 
-# 1. Check GPU
+# 1. Check Hardware
 echo "--> Checking Hardware Status..."
-if command -v nvidia-smi &> /dev/null; then
+if command -v nvidia-smi &> /dev/null && nvidia-smi &> /dev/null; then
     nvidia-smi
 else
     echo "Running in high-speed multi-core CPU mode (OpenBLAS + RapidFuzz)."
 fi
+
 
 
 # 3. Create required output directories
