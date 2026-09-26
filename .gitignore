@@ -1,6 +1,78 @@
+# ==============================================================================
+# Amazon ML Challenge - Git Ignore Configuration
+# ==============================================================================
+
+# Environments & Virtual Envs (Strictly enforce Rule 3)
 .venv/
+venv/
+env/
+ENV/
+env.bak/
+venv.bak/
+.pypoetry/
+
+# Environment Variables & Secrets
+.env
+.env.local
+.env.*.local
+!.env.example
+
+# Byte-compiled / optimized / DLL files
 __pycache__/
 *.py[cod]
+*$py.class
+*.so
+
+# Caches & Tooling
 .pytest_cache/
 .mypy_cache/
 .ruff_cache/
+.coverage
+htmlcov/
+.tox/
+.nox/
+
+# Jupyter Notebooks
+.ipynb_checkpoints
+*/.ipynb_checkpoints/*
+
+# IDEs & Editors
+.vscode/
+.idea/
+*.sublime-project
+*.sublime-workspace
+*.swp
+*.swo
+
+# OS Generated Files
+.DS_Store
+Thumbs.db
+Desktop.ini
+$RECYCLE.BIN/
+
+# Data and Outputs (Keep directory structure via .gitkeep)
+data/*
+!data/.gitkeep
+output/*
+!output/.gitkeep
+models/*
+!models/.gitkeep
+
+# Common Machine Learning / Data Artifacts
+*.csv
+*.tsv
+*.parquet
+*.feather
+*.h5
+*.hdf5
+*.pkl
+*.pickle
+*.joblib
+*.pt
+*.pth
+*.onnx
+*.bin
+
+# Log files
+*.log
+logs/

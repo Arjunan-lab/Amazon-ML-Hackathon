@@ -27,11 +27,11 @@ Run the appropriate command in your terminal to install Poetry on your machine:
 
 * Mac / Linux / Windows (WSL):
   ```bash
-  curl -sSL https://python-poetry.org | python3 -
+  curl -sSL https://install.python-poetry.org | python3 -
   ```
 * Windows (PowerShell):
   ```powershell
-  (Invoke-WebRequest -Uri "https://python-poetry.org" -UseBasicParsing).Content | python -
+  (Invoke-WebRequest -Uri "https://install.python-poetry.org" -UseBasicParsing).Content | py -
   ```
 
 Note: Restart your terminal after installation so the poetry command becomes available.
