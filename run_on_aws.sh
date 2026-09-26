@@ -10,19 +10,19 @@ echo "=================================================================="
 echo "AMAZON ML CHALLENGE: LAUNCHING AWS PIPELINE"
 echo "=================================================================="
 
+# Activate virtual environment if present
+if [ -d "venv" ]; then
+    source venv/bin/activate
+fi
+
 # 1. Check GPU
-echo "--> Checking GPU Status..."
+echo "--> Checking Hardware Status..."
 if command -v nvidia-smi &> /dev/null; then
     nvidia-smi
 else
-    echo "Warning: nvidia-smi not found. Running in CPU mode."
+    echo "Running in high-speed multi-core CPU mode (OpenBLAS + RapidFuzz)."
 fi
 
-# 2. Install dependencies
-echo "--> Installing dependencies..."
-pip install --upgrade pip
-pip install -r code/business_entity_resolution/requirements.txt
-pip install torch transformers accelerate --extra-index-url https://download.pytorch.org/whl/cu121 || pip install torch transformers accelerate
 
 # 3. Create required output directories
 mkdir -p output
