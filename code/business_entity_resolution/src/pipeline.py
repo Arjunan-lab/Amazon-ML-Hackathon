@@ -56,6 +56,19 @@ def load_ground_truth(file_path: str) -> Dict[str, Set[str]]:
     return gt
 
 
+def load_country_dataframe(file_path: str, country: str) -> pd.DataFrame:
+    """Memory-efficiently loads only rows matching the specified country in chunks."""
+    chunks = []
+    for chunk in pd.read_csv(file_path, sep="\t", chunksize=250000, dtype=str):
+        if "country" in chunk.columns:
+            filtered = chunk[chunk["country"].astype(str).str.strip() == country]
+            if not filtered.empty:
+                chunks.append(filtered)
+    if not chunks:
+        return pd.DataFrame(columns=["entity_id", "business_name", "business_address", "country"])
+    return pd.concat(chunks, ignore_index=True)
+
+
 def run_pipeline(
     train_dir: str,
     test_dir: str,
@@ -66,6 +79,8 @@ def run_pipeline(
     print("=" * 70)
     print("STARTING BUSINESS ENTITY RESOLUTION PIPELINE")
     print("=" * 70)
+
+    os.makedirs(output_dir, exist_ok=True)
 
     # 1. Check directories
     train_s1_path = os.path.join(train_dir, "train_source1.tsv")
@@ -78,8 +93,8 @@ def run_pipeline(
         print(f"[!] Warning: Neither train nor test data files found at {train_dir} and {test_dir}.")
         return
 
-    best_match_thresh = 0.68
-    best_singleton_thresh = 0.65
+    best_match_thresh = 0.86
+    best_singleton_thresh = 0.90
     model = None
 
     # -------------------------------------------------------------------------
@@ -184,84 +199,119 @@ def run_pipeline(
         gc.collect()
 
     # -------------------------------------------------------------------------
-    # Test Inference Stage
+    # Test Inference Stage (Country-Streamed for Bounded < 3.5 GB Memory)
     # -------------------------------------------------------------------------
     if has_test:
         print("\n--> [Phase 6] Running Inference on Test Dataset (Stage 6)...")
         t0 = time.time()
-        df_test_s1 = preprocess_dataframe(pd.read_csv(test_s1_path, sep="\t"))
-        df_test_s2 = preprocess_dataframe(pd.read_csv(os.path.join(test_dir, "test_source2.tsv"), sep="\t"))
-        df_test_s3 = preprocess_dataframe(pd.read_csv(os.path.join(test_dir, "test_source3.tsv"), sep="\t"))
         import gc
-        gc.collect()
-        print(f"Loaded & normalized test records: S1 ({len(df_test_s1):,}), S2 ({len(df_test_s2):,}), S3 ({len(df_test_s3):,})")
 
-        print("--> Generating Test Candidate Pairs...")
-        test_candidates = generate_candidate_pairs(df_test_s1, df_test_s2, df_test_s3, top_k_per_source=top_k)
+        # Discover countries present in test_source1
+        print("--> Discovering test countries...")
+        test_s1_full = pd.read_csv(test_s1_path, sep="\t", usecols=["country"])
+        countries_present = sorted([c for c in test_s1_full["country"].dropna().unique() if str(c).strip()])
+        del test_s1_full
+        gc.collect()
+        print(f"Discovered {len(countries_present)} test partitions: {countries_present}")
 
         cand_output_path = os.path.join(output_dir, "candidate_pairs.tsv")
-        write_candidate_pairs(test_candidates, cand_output_path)
-        print(f"Saved: {cand_output_path}")
-
-        print("--> Extracting Features & Scoring Test Pairs in Memory-Safe Batches...")
-        s1_test_dict = df_test_s1.set_index("entity_id").to_dict("index")
-        del df_test_s1
-        gc.collect()
-
-        cand_test_dict = df_test_s2.set_index("entity_id").to_dict("index")
-        del df_test_s2
-        gc.collect()
-
-        cand_test_dict.update(df_test_s3.set_index("entity_id").to_dict("index"))
-        del df_test_s3
-        gc.collect()
-
-
         matching_output_path = os.path.join(output_dir, "matching_results.tsv")
-        all_test_s1_ids = list(test_candidates.keys())
-        batch_size = 5000
 
-        with open(matching_output_path, "w", encoding="utf-8") as f_out:
-            f_out.write("source1_entity_id\tmatched_entity_ids\n")
+        # Initialize output files with headers
+        with open(cand_output_path, "w", encoding="utf-8") as f_c:
+            f_c.write("source1_entity_id\tcandidate_entity_ids\n")
 
-            for i in tqdm(range(0, len(all_test_s1_ids), batch_size), desc="Scoring Test Batches"):
-                batch_s1_ids = all_test_s1_ids[i : i + batch_size]
-                batch_rows = []
-                batch_pairs = []
+        with open(matching_output_path, "w", encoding="utf-8") as f_m:
+            f_m.write("source1_entity_id\tmatched_entity_ids\n")
 
-                for s1_id in batch_s1_ids:
-                    s1_row = s1_test_dict.get(s1_id)
-                    if s1_row is None:
-                        continue
-                    c_list = test_candidates.get(s1_id, [])
+        s2_test_path = os.path.join(test_dir, "test_source2.tsv")
+        s3_test_path = os.path.join(test_dir, "test_source3.tsv")
 
-                    for rank, cid in enumerate(c_list, start=1):
-                        cand_row = cand_test_dict.get(cid)
-                        if cand_row is None:
+        for country in countries_present:
+            print(f"\n---> [Partition: {country}] Loading & Normalizing...")
+            t_part = time.time()
+
+            df_s1_c = load_country_dataframe(test_s1_path, country)
+            df_s2_c = load_country_dataframe(s2_test_path, country)
+            df_s3_c = load_country_dataframe(s3_test_path, country)
+            print(f"  [{country}] Raw rows: S1={len(df_s1_c):,}, S2={len(df_s2_c):,}, S3={len(df_s3_c):,}")
+
+            # Preprocess only this country partition
+            df_s1_c = preprocess_dataframe(df_s1_c)
+            df_s2_c = preprocess_dataframe(df_s2_c)
+            df_s3_c = preprocess_dataframe(df_s3_c)
+
+            print(f"  [{country}] Generating candidates...")
+            candidates_c = generate_candidate_pairs(df_s1_c, df_s2_c, df_s3_c, top_k_per_source=top_k)
+
+            # Append candidates to candidate_pairs.tsv
+            with open(cand_output_path, "a", encoding="utf-8") as f_c:
+                for s1_id, c_list in candidates_c.items():
+                    f_c.write(f"{s1_id}\t{','.join(c_list)}\n")
+
+            # Build hash tables for scoring this country only
+            s1_dict_c = df_s1_c.set_index("entity_id").to_dict("index")
+            del df_s1_c
+            gc.collect()
+
+            cand_dict_c = df_s2_c.set_index("entity_id").to_dict("index")
+            del df_s2_c
+            gc.collect()
+
+            cand_dict_c.update(df_s3_c.set_index("entity_id").to_dict("index"))
+            del df_s3_c
+            gc.collect()
+
+            print(f"  [{country}] Scoring candidates in memory-safe streaming batches...")
+            c_s1_ids = list(candidates_c.keys())
+            batch_size = 5000
+
+            with open(matching_output_path, "a", encoding="utf-8") as f_m:
+                for i in tqdm(range(0, len(c_s1_ids), batch_size), desc=f"Scoring [{country}] Batches"):
+                    batch_s1_ids = c_s1_ids[i : i + batch_size]
+                    batch_rows = []
+                    batch_pairs = []
+
+                    for s1_id in batch_s1_ids:
+                        s1_row = s1_dict_c.get(s1_id)
+                        if s1_row is None:
                             continue
-                        feat = extract_pair_features(s1_row, cand_row, blocking_rank=rank)
-                        batch_rows.append(feat)
-                        batch_pairs.append((s1_id, cid))
+                        c_list = candidates_c.get(s1_id, [])
 
-                batch_scores_per_s1 = {s1_id: [] for s1_id in batch_s1_ids}
-                if model is not None and batch_rows:
-                    X_batch = np.array(batch_rows, dtype=np.float32)
-                    batch_probs = predict_pair_scores(model, X_batch)
-                    for (s1_id, cid), prob in zip(batch_pairs, batch_probs):
-                        batch_scores_per_s1[s1_id].append((cid, float(prob)))
+                        for rank, cid in enumerate(c_list, start=1):
+                            cand_row = cand_dict_c.get(cid)
+                            if cand_row is None:
+                                continue
+                            feat = extract_pair_features(s1_row, cand_row, blocking_rank=rank)
+                            batch_rows.append(feat)
+                            batch_pairs.append((s1_id, cid))
 
-                batch_matches = apply_threshold_and_singleton_filter(
-                    batch_scores_per_s1,
-                    all_s1_ids=batch_s1_ids,
-                    match_threshold=best_match_thresh,
-                    singleton_threshold=best_singleton_thresh,
-                )
+                    batch_scores_per_s1 = {s1_id: [] for s1_id in batch_s1_ids}
+                    if model is not None and batch_rows:
+                        X_batch = np.array(batch_rows, dtype=np.float32)
+                        batch_probs = predict_pair_scores(model, X_batch)
+                        for (s1_id, cid), prob in zip(batch_pairs, batch_probs):
+                            batch_scores_per_s1[s1_id].append((cid, float(prob)))
 
-                for s1_id in batch_s1_ids:
-                    matches = batch_matches.get(s1_id, [])
-                    f_out.write(f"{s1_id}\t{','.join(matches)}\n")
+                    batch_matches = apply_threshold_and_singleton_filter(
+                        batch_scores_per_s1,
+                        all_s1_ids=batch_s1_ids,
+                        match_threshold=best_match_thresh,
+                        singleton_threshold=best_singleton_thresh,
+                    )
 
-        print(f"Saved: {matching_output_path} in {time.time()-t0:.2f}s")
+                    for s1_id in batch_s1_ids:
+                        matches = batch_matches.get(s1_id, [])
+                        f_m.write(f"{s1_id}\t{','.join(matches)}\n")
+
+            # Completely free partition memory
+            del candidates_c, s1_dict_c, cand_dict_c, c_s1_ids
+            gc.collect()
+            print(f"  [{country}] Partition completed in {time.time()-t_part:.2f}s and memory reclaimed!")
+
+        print(f"\n--> Test inference complete in {time.time()-t0:.2f}s!")
+        print(f"Saved: {cand_output_path}")
+        print(f"Saved: {matching_output_path}")
 
     print("\n" + "=" * 70)
     print("PIPELINE COMPLETED SUCCESSFULLY!")
@@ -284,5 +334,6 @@ if __name__ == "__main__":
         top_k=args.top_k,
         max_train_samples=args.max_train_samples,
     )
+
 
 
