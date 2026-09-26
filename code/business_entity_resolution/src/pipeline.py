@@ -193,46 +193,55 @@ def run_pipeline(
         write_candidate_pairs(test_candidates, cand_output_path)
         print(f"Saved: {cand_output_path}")
 
-        print("--> Extracting Features & Scoring Test Pairs...")
+        print("--> Extracting Features & Scoring Test Pairs in Memory-Safe Batches...")
         df_test_cand_all = pd.concat([df_test_s2, df_test_s3], ignore_index=True)
         s1_test_lookup = df_test_s1.set_index("entity_id")
         cand_test_lookup = df_test_cand_all.set_index("entity_id")
 
-        X_test_rows = []
-        pair_mappings = []
-
-        for s1_id, c_list in tqdm(test_candidates.items(), desc="Extracting Test Features"):
-            if s1_id not in s1_test_lookup.index:
-                continue
-            s1_row = s1_test_lookup.loc[s1_id]
-
-            for rank, cid in enumerate(c_list, start=1):
-                if cid not in cand_test_lookup.index:
-                    continue
-                cand_row = cand_test_lookup.loc[cid]
-                feat = extract_pair_features(s1_row, cand_row, blocking_rank=rank)
-                X_test_rows.append(feat)
-                pair_mappings.append((s1_id, cid))
-
-        if model is not None and X_test_rows:
-            X_test = np.array(X_test_rows, dtype=np.float32)
-            test_probs = predict_pair_scores(model, X_test)
-
-            test_scores_per_s1 = {s1_id: [] for s1_id in df_test_s1["entity_id"]}
-            for (s1_id, cid), prob in zip(pair_mappings, test_probs):
-                test_scores_per_s1[s1_id].append((cid, float(prob)))
-
-            final_matches = apply_threshold_and_singleton_filter(
-                test_scores_per_s1,
-                all_s1_ids=df_test_s1["entity_id"].astype(str).tolist(),
-                match_threshold=best_match_thresh,
-                singleton_threshold=best_singleton_thresh,
-            )
-        else:
-            final_matches = {s1_id: [] for s1_id in df_test_s1["entity_id"]}
-
         matching_output_path = os.path.join(output_dir, "matching_results.tsv")
-        write_matching_results(final_matches, matching_output_path)
+        all_test_s1_ids = list(test_candidates.keys())
+        batch_size = 5000
+
+        with open(matching_output_path, "w", encoding="utf-8") as f_out:
+            f_out.write("source1_entity_id\tmatched_entity_ids\n")
+
+            for i in tqdm(range(0, len(all_test_s1_ids), batch_size), desc="Scoring Test Batches"):
+                batch_s1_ids = all_test_s1_ids[i : i + batch_size]
+                batch_rows = []
+                batch_pairs = []
+
+                for s1_id in batch_s1_ids:
+                    if s1_id not in s1_test_lookup.index:
+                        continue
+                    s1_row = s1_test_lookup.loc[s1_id]
+                    c_list = test_candidates.get(s1_id, [])
+
+                    for rank, cid in enumerate(c_list, start=1):
+                        if cid not in cand_test_lookup.index:
+                            continue
+                        cand_row = cand_test_lookup.loc[cid]
+                        feat = extract_pair_features(s1_row, cand_row, blocking_rank=rank)
+                        batch_rows.append(feat)
+                        batch_pairs.append((s1_id, cid))
+
+                batch_scores_per_s1 = {s1_id: [] for s1_id in batch_s1_ids}
+                if model is not None and batch_rows:
+                    X_batch = np.array(batch_rows, dtype=np.float32)
+                    batch_probs = predict_pair_scores(model, X_batch)
+                    for (s1_id, cid), prob in zip(batch_pairs, batch_probs):
+                        batch_scores_per_s1[s1_id].append((cid, float(prob)))
+
+                batch_matches = apply_threshold_and_singleton_filter(
+                    batch_scores_per_s1,
+                    all_s1_ids=batch_s1_ids,
+                    match_threshold=best_match_thresh,
+                    singleton_threshold=best_singleton_thresh,
+                )
+
+                for s1_id in batch_s1_ids:
+                    matches = batch_matches.get(s1_id, [])
+                    f_out.write(f"{s1_id}\t{','.join(matches)}\n")
+
         print(f"Saved: {matching_output_path} in {time.time()-t0:.2f}s")
 
     print("\n" + "=" * 70)
@@ -246,7 +255,7 @@ if __name__ == "__main__":
     parser.add_argument("--test-dir", default="data/test", help="Directory with test source files")
     parser.add_argument("--output-dir", default="output", help="Directory to save submission files")
     parser.add_argument("--top-k", type=int, default=20, help="Number of candidates to generate per source")
-    parser.add_argument("--max-train-samples", type=int, default=150000, help="Maximum S1 training samples")
+    parser.add_argument("--max-train-samples", type=int, default=80000, help="Maximum S1 training samples")
     args = parser.parse_args()
 
     run_pipeline(
@@ -256,3 +265,4 @@ if __name__ == "__main__":
         top_k=args.top_k,
         max_train_samples=args.max_train_samples,
     )
+
