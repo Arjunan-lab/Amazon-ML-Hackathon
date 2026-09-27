@@ -167,11 +167,7 @@ def generate_candidate_pairs(
                 row_cols = similarity_sparse.indices[r_start:r_end]
                 row_vals = similarity_sparse.data[r_start:r_end]
 
-                sim_map = {}
-                for c_col, c_val in zip(row_cols, row_vals):
-                    sim_map[int(c_col)] = float(c_val)
-
-                # 1. Retrieve top lexical candidates from sparse non-zeros
+                # 1. Retrieve top lexical candidates from sparse non-zeros using fast vectorization
                 if len(row_vals) > 0:
                     valid_mask = row_vals >= 0.08
                     v_cols = row_cols[valid_mask]
@@ -180,11 +176,15 @@ def generate_candidate_pairs(
                         top_p = np.argpartition(-v_vals, total_target_k)[:total_target_k]
                         top_p = top_p[np.argsort(-v_vals[top_p])]
                         top_cand_indices = [int(v_cols[p]) for p in top_p]
+                        top_cand_scores = [float(v_vals[p]) for p in top_p]
                     else:
                         top_p = np.argsort(-v_vals)
                         top_cand_indices = [int(v_cols[p]) for p in top_p]
+                        top_cand_scores = [float(v_vals[p]) for p in top_p]
+                    sim_map = dict(zip(top_cand_indices, top_cand_scores))
                 else:
                     top_cand_indices = []
+                    sim_map = {}
 
                 # 2. Add Number Anchor candidates (Pass B)
                 s1_nums = s1_country_num_tokens[global_s1_idx]
@@ -193,8 +193,7 @@ def generate_candidate_pairs(
                     for num in s1_nums:
                         if len(num) >= 3 and num in num_anchor_index:
                             for c_idx in num_anchor_index[num][:10]:
-                                if sim_map.get(c_idx, 0.0) > 0.03:
-                                    anchor_indices.add(c_idx)
+                                anchor_indices.add(c_idx)
 
                 # 3. Merge and balance between S2 and S3
                 s2_candidates = []
