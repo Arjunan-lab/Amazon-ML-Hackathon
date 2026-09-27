@@ -66,7 +66,7 @@ def generate_candidate_pairs(
     df_s2: pd.DataFrame,
     df_s3: pd.DataFrame,
     top_k_per_source: int = 20,
-    chunk_size: int = 200,
+    chunk_size: int = 50,
     max_features: int = 200000,
 ) -> Dict[str, List[str]]:
     """Generates candidate matches from S2 and S3 for every entity in S1.
@@ -122,10 +122,13 @@ def generate_candidate_pairs(
         ).tolist()
 
         # Pass A: Sparse Character Trigram TF-IDF Index (bounded vocabulary)
+        max_df_val = 0.35 if len(cand_country) >= 1000 else 1.0
+        min_df_val = 2 if len(cand_country) >= 1000 else 1
         vectorizer = TfidfVectorizer(
             analyzer="char_wb",
             ngram_range=(3, 3),
-            min_df=2,
+            min_df=min_df_val,
+            max_df=max_df_val,
             max_features=40000,
             sublinear_tf=True,
             dtype=np.float32,
@@ -234,9 +237,9 @@ def generate_candidate_pairs(
 
             return chunk_pairs
 
-        # Parallel multi-core execution (100% CPU usage across all cores)
+        # Parallel multi-core execution (bounded RAM utilization)
         chunk_starts = list(range(0, n_queries, chunk_size))
-        all_chunk_results = Parallel(n_jobs=-1, prefer="threads", batch_size=1)(
+        all_chunk_results = Parallel(n_jobs=8, prefer="threads", batch_size=1)(
             delayed(_process_single_chunk)(start_idx)
             for start_idx in tqdm(chunk_starts, desc=f"Blocking [{country}]", unit="chunk")
         )
