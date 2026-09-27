@@ -38,7 +38,7 @@ def create_production_ranker(
         reg_lambda=reg_lambda,
         class_weight="balanced",
         random_state=random_state,
-        n_jobs=4,
+        n_jobs=-1,
         verbose=-1,
     )
 

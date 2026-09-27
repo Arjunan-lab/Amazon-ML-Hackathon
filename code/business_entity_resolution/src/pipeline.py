@@ -23,6 +23,7 @@ if PROJECT_ROOT not in sys.path:
 import numpy as np
 import pandas as pd
 from tqdm import tqdm
+from joblib import Parallel, delayed
 
 from code.business_entity_resolution.src.normalization import preprocess_dataframe
 from code.business_entity_resolution.src.blocking import generate_candidate_pairs, write_candidate_pairs
@@ -75,6 +76,7 @@ def run_pipeline(
     output_dir: str,
     top_k: int = 20,
     max_train_samples: int = 150000,
+    force_retrain: bool = False,
 ):
     print("=" * 70)
     print("STARTING BUSINESS ENTITY RESOLUTION PIPELINE")
@@ -100,7 +102,7 @@ def run_pipeline(
     model_save_path = os.path.join(output_dir, "ranker_model.joblib")
     thresh_save_path = os.path.join(output_dir, "thresholds.json")
 
-    if os.path.exists(model_save_path) and os.path.exists(thresh_save_path):
+    if not force_retrain and os.path.exists(model_save_path) and os.path.exists(thresh_save_path):
         import joblib, json
         print(f"\n--> Found cached trained model at {model_save_path}. Loading...")
         model = joblib.load(model_save_path)
@@ -147,26 +149,36 @@ def run_pipeline(
         import gc
         gc.collect()
 
-        X_rows = []
-        y_labels = []
-
-        for s1_id, c_list in tqdm(train_candidates.items(), desc="Extracting Train Features"):
+        # Multi-threaded feature extraction utilizing 100% CPU cores
+        def _extract_train_features(s1_id: str):
             s1_row = s1_dict.get(s1_id)
             if s1_row is None:
-                continue
+                return []
+            c_list = train_candidates.get(s1_id, [])
             true_matches = gt_train.get(s1_id, set())
-
+            sub_pairs = []
             for rank, cid in enumerate(c_list, start=1):
                 cand_row = cand_dict.get(cid)
                 if cand_row is None:
                     continue
                 feat = extract_pair_features(s1_row, cand_row, blocking_rank=rank)
                 label = 1 if cid in true_matches else 0
+                sub_pairs.append((feat, label))
+            return sub_pairs
 
+        train_s1_keys = list(train_candidates.keys())
+        extracted_train = Parallel(n_jobs=-1, prefer="threads", batch_size=200)(
+            delayed(_extract_train_features)(s1_id)
+            for s1_id in tqdm(train_s1_keys, desc="Extracting Train Features (100% CPU)")
+        )
+        X_rows = []
+        y_labels = []
+        for pair_list in extracted_train:
+            for feat, label in pair_list:
                 X_rows.append(feat)
                 y_labels.append(label)
 
-        del s1_dict, cand_dict
+        del s1_dict, cand_dict, extracted_train
         gc.collect()
 
         X_train = np.array(X_rows, dtype=np.float32)
@@ -296,19 +308,28 @@ def run_pipeline(
                     batch_rows = []
                     batch_pairs = []
 
-                    for s1_id in batch_s1_ids:
+                    # Parallel feature extraction across all CPU cores
+                    def _extract_inference_features(s1_id: str):
                         s1_row = s1_dict_c.get(s1_id)
                         if s1_row is None:
-                            continue
+                            return []
                         c_list = candidates_c.get(s1_id, [])
-
+                        sub_pairs = []
                         for rank, cid in enumerate(c_list, start=1):
                             cand_row = cand_dict_c.get(cid)
                             if cand_row is None:
                                 continue
                             feat = extract_pair_features(s1_row, cand_row, blocking_rank=rank)
+                            sub_pairs.append((feat, (s1_id, cid)))
+                        return sub_pairs
+
+                    extracted_infer = Parallel(n_jobs=-1, prefer="threads", batch_size=100)(
+                        delayed(_extract_inference_features)(s1_id) for s1_id in batch_s1_ids
+                    )
+                    for item_list in extracted_infer:
+                        for feat, pair in item_list:
                             batch_rows.append(feat)
-                            batch_pairs.append((s1_id, cid))
+                            batch_pairs.append(pair)
 
                     batch_scores_per_s1 = {s1_id: [] for s1_id in batch_s1_ids}
                     if model is not None and batch_rows:
@@ -349,6 +370,7 @@ if __name__ == "__main__":
     parser.add_argument("--output-dir", default="output", help="Directory to save submission files")
     parser.add_argument("--top-k", type=int, default=15, help="Number of candidates to generate per source")
     parser.add_argument("--max-train-samples", type=int, default=40000, help="Maximum S1 training samples")
+    parser.add_argument("--force-retrain", action="store_true", help="Force retraining the model even if cached model exists")
     args = parser.parse_args()
 
     run_pipeline(
@@ -357,6 +379,7 @@ if __name__ == "__main__":
         output_dir=args.output_dir,
         top_k=args.top_k,
         max_train_samples=args.max_train_samples,
+        force_retrain=args.force_retrain,
     )
 
 

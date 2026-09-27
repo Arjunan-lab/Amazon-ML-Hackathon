@@ -23,6 +23,8 @@ import numpy as np
 import pandas as pd
 from scipy.sparse import csr_matrix
 from sklearn.feature_extraction.text import TfidfVectorizer
+from joblib import Parallel, delayed
+from tqdm import tqdm
 
 
 def _extract_top_k_indices(scores_row: np.ndarray, k: int, min_score: float = 0.08) -> List[int]:
@@ -149,13 +151,14 @@ def generate_candidate_pairs(
         total_target_k = top_k_per_source * 2
         s1_country_num_tokens = s1_country["num_tokens"].tolist()
 
-        for start_idx in range(0, n_queries, chunk_size):
+        def _process_single_chunk(start_idx: int) -> List[Tuple[str, List[str]]]:
             end_idx = min(start_idx + chunk_size, n_queries)
             s1_chunk_texts = s1_texts[start_idx:end_idx]
             s1_chunk_matrix = vectorizer.transform(s1_chunk_texts)
 
             # Sparse dot product with bounded chunk size: (200 x V) * (V x N_cands)
             similarity_sparse = s1_chunk_matrix.dot(cand_matrix_t)
+            chunk_pairs = []
 
             for local_i in range(len(s1_chunk_texts)):
                 global_s1_idx = start_idx + local_i
@@ -227,6 +230,18 @@ def generate_candidate_pairs(
                     if idx < len(s3_candidates):
                         merged_candidates.append(s3_candidates[idx])
 
+                chunk_pairs.append((s1_id, merged_candidates))
+
+            return chunk_pairs
+
+        # Parallel multi-core execution (100% CPU usage across all cores)
+        chunk_starts = list(range(0, n_queries, chunk_size))
+        all_chunk_results = Parallel(n_jobs=-1, prefer="threads", batch_size=1)(
+            delayed(_process_single_chunk)(start_idx)
+            for start_idx in tqdm(chunk_starts, desc=f"Blocking [{country}]", unit="chunk")
+        )
+        for chunk_pairs in all_chunk_results:
+            for s1_id, merged_candidates in chunk_pairs:
                 candidate_results[s1_id] = merged_candidates
 
 
